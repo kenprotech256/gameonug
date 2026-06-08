@@ -220,8 +220,14 @@ footer{border-top:1px solid var(--border);padding:40px 48px;display:flex;justify
 .auth-form{display:none;}
 .auth-form.active{display:block;}
 .f-label{display:block;font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
-.f-input,.f-select{width:100%;padding:11px 14px;background:rgba(255,255,255,.055);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:.88rem;outline:none;transition:all .2s;margin-bottom:12px;}
-.f-input:focus,.f-select:focus{border-color:rgba(0,212,255,.4);background:rgba(0,212,255,.05);}
+.f-input,.f-select{width:100%;padding:11px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:10px;color:white;font-size:.88rem;outline:none;transition:all .2s;margin-bottom:12px;-webkit-text-fill-color:white;color-scheme:dark;}
+.f-input:focus,.f-select:focus{border-color:rgba(0,212,255,.4);background:rgba(0,212,255,.06);}
+.f-input:-webkit-autofill,.f-input:-webkit-autofill:hover,.f-input:-webkit-autofill:focus{
+  -webkit-text-fill-color:white;
+  -webkit-box-shadow:0 0 0px 1000px rgba(8,10,20,.96) inset;
+  background-color:rgba(8,10,20,.96) !important;
+  border-color:rgba(0,212,255,.4);
+}
 .f-input::placeholder{color:rgba(255,255,255,.18);}
 .f-select{appearance:none;-webkit-appearance:none;}
 .f-select option{background:#080a14;}
@@ -435,8 +441,8 @@ footer{border-top:1px solid var(--border);padding:40px 48px;display:flex;justify
   <div class="auth-box">
     <button class="auth-close" onclick="closeAuth()">✕</button>
     <div class="auth-inner">
-      <div class="auth-logo">GAME<em>ON</em>UG</div>
-      <div class="auth-tagline">🇺🇬 Uganda's #1 Gaming Community</div>
+      <div class="auth-logo" style="letter-spacing:-0.02em">GAME<span style="color:var(--blue);font-style:normal">ON</span>UG</div>
+      <div class="auth-tagline">Uganda's #1 Gaming Community 🇺🇬</div>
       <div class="auth-tabs">
         <button class="auth-tab active" id="tab-login" onclick="switchTab('login')">Sign In</button>
         <button class="auth-tab" id="tab-register" onclick="switchTab('register')">Register</button>
@@ -828,7 +834,7 @@ footer{border-top:1px solid var(--border);padding:40px 48px;display:flex;justify
 import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import{getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import{getDatabase,ref,set,get,push,remove,update}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
-import{getStorage,ref as sRef,uploadBytes,getDownloadURL,deleteObject}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
 
 const ADMIN_EMAIL = "Kazibwekenneth57@gmail.com";
 const firebaseConfig = {
@@ -843,7 +849,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
-const storage = getStorage(app);
+
 
 let currentUser = null;
 let currentUserData = null;
@@ -895,12 +901,52 @@ const DEFAULT_PLAYERS = [
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     currentUser = user;
-    const snap = await get(ref(db, "users/" + user.uid));
-    if (snap.exists()) {
-      currentUserData = snap.val();
-      updateSidebar(currentUserData);
+    try {
+      const snap = await get(ref(db, "users/" + user.uid));
+      if (snap.exists()) {
+        currentUserData = snap.val();
+        updateSidebar(currentUserData);
+        // Hide any loading spinners
+        ["login-load","reg-load"].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.style.display = "none";
+        });
+        closeAuth();
+        // Route based on admin or player
+        if (user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+          showDashboard("admin");
+          renderAdminSection("overview");
+        } else {
+          showDashboard("player");
+          renderPlayerSection("overview");
+        }
+      } else {
+        // User exists in auth but not in database — create their record
+        const defaultData = {
+          username: user.email.split("@")[0],
+          email: user.email,
+          city: "Uganda",
+          favGame: "EA FC 26",
+          avatar: "🎮",
+          points: 0, wins: 0, rank: "Bronze",
+          premium: false, joinedAt: Date.now()
+        };
+        await set(ref(db, "users/" + user.uid), defaultData);
+        currentUserData = defaultData;
+        updateSidebar(currentUserData);
+        closeAuth();
+        if (user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+          showDashboard("admin");
+          renderAdminSection("overview");
+        } else {
+          showDashboard("player");
+          renderPlayerSection("overview");
+        }
+      }
+    } catch(e) {
+      console.error("Auth state error:", e);
+      // Even on error, still route the user
       closeAuth();
-      // Route based on admin or player
       if (user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
         showDashboard("admin");
         renderAdminSection("overview");
@@ -981,12 +1027,21 @@ window.doLogin = async () => {
   const errEl = document.getElementById("login-err");
   const loadEl = document.getElementById("login-load");
   if (!email || !pass) { showError(errEl,"Please enter email and password."); return; }
-  hideError(errEl); loadEl.style.display = "flex";
+  hideError(errEl);
+  loadEl.style.display = "flex";
+  loadEl.innerHTML = '<div class="spinner"></div>';
   try {
     await signInWithEmailAndPassword(auth, email, pass);
-    // onAuthStateChanged handles routing
+    // onAuthStateChanged will handle routing — do NOT hide loader here, let auth state handle it
   } catch (e) {
-    showError(errEl, "Wrong email or password. Please try again.");
+    const code = e.code;
+    if (code === "auth/user-not-found" || code === "auth/wrong-password" || code === "auth/invalid-credential") {
+      showError(errEl, "Wrong email or password. Please try again.");
+    } else if (code === "auth/invalid-email") {
+      showError(errEl, "Please enter a valid email address.");
+    } else {
+      showError(errEl, "Login failed. Please try again.");
+    }
     loadEl.style.display = "none";
   }
 };
@@ -1255,18 +1310,24 @@ window.pickAvatar = (emoji, el) => {
 /* ══ UPLOAD HELPERS ══ */
 window.uploadFile = async (file, path, onSuccess) => {
   if (!file) return;
-  toast("Uploading...");
-  try {
-    const storageRef = sRef(storage, path);
-    await uploadBytes(storageRef, file);
-    const url = await getDownloadURL(storageRef);
-    if (onSuccess) onSuccess(url);
-    toast("Uploaded successfully! ✅");
-    return url;
-  } catch(e) {
-    toast("Upload failed. Check Firebase Storage rules.");
-    return null;
-  }
+  // Convert to base64 data URL and save to Firebase Database
+  // Works on GitHub Pages without Firebase Storage setup
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const dataUrl = e.target.result;
+      // For large files, just store the data URL directly
+      // For production, set up Firebase Storage and uncomment the storage code above
+      toast("Logo saved! ✅ (Connect Firebase Storage for production)");
+      if (onSuccess) onSuccess(dataUrl);
+      resolve(dataUrl);
+    };
+    reader.onerror = () => {
+      toast("Error reading file.");
+      resolve(null);
+    };
+    reader.readAsDataURL(file);
+  });
 };
 
 window.uploadGameLogo = async (gameId, file) => {
