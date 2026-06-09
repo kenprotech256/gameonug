@@ -395,6 +395,20 @@ footer{border-top:1px solid var(--border);padding:40px 48px;display:flex;justify
 /* Post list */
 .post-item{background:rgba(255,255,255,.028);border:1px solid var(--border);border-radius:13px;padding:14px;margin-bottom:9px;}
 
+/* Confirm Modal */
+#confirm-modal{position:fixed;inset:0;z-index:2000;display:none;align-items:center;justify-content:center;}
+#confirm-modal.open{display:flex;}
+#confirm-modal::before{content:'';position:absolute;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);}
+.confirm-box{background:rgba(8,10,20,.98);border:1px solid var(--border2);border-radius:18px;padding:28px;width:100%;max-width:360px;position:relative;z-index:1;text-align:center;}
+.confirm-title{font-size:15px;font-weight:800;color:white;margin-bottom:8px;}
+.confirm-msg{font-size:12.5px;color:var(--muted);margin-bottom:22px;line-height:1.6;}
+.confirm-btns{display:flex;gap:10px;}
+
+/* Notification Panel */
+#notif-panel{position:fixed;top:56px;right:16px;width:320px;max-height:480px;overflow-y:auto;z-index:600;background:rgba(8,10,20,.98);backdrop-filter:blur(24px);border:1px solid var(--border2);border-radius:16px;padding:16px;display:none;box-shadow:0 20px 60px rgba(0,0,0,.5);}
+#notif-panel.open{display:block;}
+.notif-panel-title{font-size:13px;font-weight:800;color:white;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;}
+
 /* Toast */
 #toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%) translateY(16px);background:rgba(8,10,20,.98);backdrop-filter:blur(20px);border:1px solid var(--border2);border-radius:10px;padding:11px 20px;font-size:12px;font-weight:600;color:var(--text);z-index:9999;opacity:0;transition:all .35s;white-space:nowrap;pointer-events:none;}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
@@ -427,6 +441,27 @@ footer{border-top:1px solid var(--border);padding:40px 48px;display:flex;justify
 </style>
 </head>
 <body>
+
+<!-- CONFIRM MODAL -->
+<div id="confirm-modal">
+  <div class="confirm-box">
+    <div class="confirm-title" id="confirm-title">Are you sure?</div>
+    <div class="confirm-msg" id="confirm-msg">This action cannot be undone.</div>
+    <div class="confirm-btns">
+      <button class="btn btn-ghost" style="flex:1" onclick="closeConfirm()">Cancel</button>
+      <button class="btn" id="confirm-ok-btn" style="flex:1;background:var(--pink);color:white">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- NOTIFICATION PANEL -->
+<div id="notif-panel">
+  <div class="notif-panel-title">
+    <span>🔔 Notifications</span>
+    <button onclick="closeNotifPanel()" style="background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer">✕</button>
+  </div>
+  <div id="notif-panel-list"></div>
+</div>
 
 <!-- TOAST -->
 <div id="toast"></div>
@@ -778,7 +813,7 @@ footer{border-top:1px solid var(--border);padding:40px 48px;display:flex;justify
     <div class="db-topbar">
       <div class="db-topbar-title" id="player-topbar-title">Dashboard</div>
       <div class="db-topbar-right">
-        <button class="db-icon-btn" onclick="playerSection('notifications',null)">🔔<div class="notif-dot"></div></button>
+        <button class="db-icon-btn" onclick="toggleNotifPanel()">🔔<div class="notif-dot"></div></button>
         <div id="topbar-av" style="width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-size:15px;cursor:pointer" onclick="playerSection('settings',null)">🎮</div>
       </div>
     </div>
@@ -832,7 +867,7 @@ footer{border-top:1px solid var(--border);padding:40px 48px;display:flex;justify
 
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import{getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import{getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,onAuthStateChanged,browserSessionPersistence,setPersistence,deleteUser as fbDeleteUser}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import{getDatabase,ref,set,get,push,remove,update}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
 
@@ -848,6 +883,11 @@ const firebaseConfig = {
 };
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+// Use SESSION persistence so login only lasts until browser tab closes
+// This prevents auto-login on next visit
+setPersistence(auth, browserSessionPersistence).catch(()=>{});
+// Use session persistence so user must log in each browser session
+setPersistence(auth, browserSessionPersistence).catch(()=>{});
 const db = getDatabase(app);
 
 
@@ -1309,33 +1349,54 @@ window.pickAvatar = (emoji, el) => {
 
 /* ══ UPLOAD HELPERS ══ */
 window.uploadFile = async (file, path, onSuccess) => {
-  if (!file) return;
-  // Convert to base64 data URL and save to Firebase Database
-  // Works on GitHub Pages without Firebase Storage setup
+  if (!file) return null;
+  // Use FileReader to convert to base64 and store in Firebase Realtime Database
+  // This works without Firebase Storage billing
   return new Promise((resolve) => {
+    const MAX_SIZE = 2 * 1024 * 1024; // 2MB limit for DB storage
+    if (file.size > MAX_SIZE) {
+      toast("File too large. Please use an image under 2MB.");
+      resolve(null);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = async (e) => {
-      const dataUrl = e.target.result;
-      // For large files, just store the data URL directly
-      // For production, set up Firebase Storage and uncomment the storage code above
-      toast("Logo saved! ✅ (Connect Firebase Storage for production)");
-      if (onSuccess) onSuccess(dataUrl);
-      resolve(dataUrl);
+      try {
+        const dataUrl = e.target.result;
+        // Store base64 in Firebase Realtime Database
+        const pathKey = path.replace(/[\.\[\]#\$]/g, "_");
+        await set(ref(db, "uploads/" + pathKey), {
+          data: dataUrl,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          uploadedAt: Date.now()
+        });
+        toast("Uploaded successfully! ✅");
+        if (onSuccess) onSuccess(dataUrl);
+        resolve(dataUrl);
+      } catch(err) {
+        toast("Upload failed: " + (err.message || "Database error"));
+        resolve(null);
+      }
     };
-    reader.onerror = () => {
-      toast("Error reading file.");
-      resolve(null);
-    };
+    reader.onerror = () => { toast("Error reading file."); resolve(null); };
     reader.readAsDataURL(file);
   });
 };
 
 window.uploadGameLogo = async (gameId, file) => {
-  const url = await uploadFile(file, `media/games/${gameId}`, url => {
-    set(ref(db, `media/games/${gameId}`), {url, name: gameId, updatedAt: Date.now()});
-    // Update on page live
-    const el = document.getElementById("game-logo-"+gameId);
-    if (el) el.innerHTML = `<img src="${url}" style="width:60px;height:60px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.5))">`;
+  toast("Uploading " + file.name + "...");
+  const url = await uploadFile(file, "media/games/" + gameId, (url) => {
+    // Update the logo on the homepage game cards
+    const els = document.querySelectorAll("#game-logo-" + gameId);
+    els.forEach(el => {
+      el.innerHTML = '<img src="' + url + '" style="width:60px;height:60px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.5))">';
+    });
+    // Also update the media manager preview
+    const mediEl = document.getElementById("media-game-" + gameId);
+    if (mediEl) mediEl.innerHTML = '<img src="' + url + '" style="width:100%;height:100%;object-fit:contain;padding:4px">';
+    toast("✅ " + gameId + " logo uploaded and live!");
   });
   return url;
 };
@@ -1353,14 +1414,312 @@ window.uploadAvatar = async (avatarId, file, avatarData) => {
 };
 
 /* ══ PLAYER DASHBOARD ══ */
+
+
+window.loadCustomAvatars = async () => {
+  const el = document.getElementById("custom-avatars-list");
+  if (!el) return;
+  try {
+    const snap = await get(ref(db,"uploads"));
+    if (!snap.exists()) { el.innerHTML='<div style="text-align:center;padding:16px;color:var(--muted)">No custom avatars uploaded yet.</div>'; return; }
+    const items = [];
+    snap.forEach(c => { if(c.key.startsWith("avatars_")) items.push({key:c.key,...c.val()}); });
+    if (!items.length) { el.innerHTML='<div style="text-align:center;padding:16px;color:var(--muted)">No custom avatars yet. Upload above!</div>'; return; }
+    el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:10px">
+      ${items.map(item=>`
+        <div style="border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,.03);overflow:hidden;text-align:center;padding:12px 8px;position:relative" onmouseover="this.querySelector('.del-av').style.opacity='1'" onmouseout="this.querySelector('.del-av').style.opacity='0'">
+          ${item.data?`<img src="${item.data}" style="width:40px;height:40px;object-fit:contain;border-radius:8px;margin:0 auto 6px">`:'<div style="font-size:2rem;margin-bottom:6px">⭐</div>'}
+          <div style="font-size:9px;color:var(--muted);font-weight:600">${item.name||item.key}</div>
+          <button class="del-av" onclick="deleteAdminAvatar('${item.key.replace("avatars_","")}','${item.name||"Avatar"}')" style="position:absolute;top:4px;right:4px;width:18px;height:18px;border-radius:4px;background:rgba(255,45,120,.85);border:none;color:white;font-size:10px;cursor:pointer;opacity:0;transition:opacity .2s">×</button>
+        </div>
+      `).join("")}
+    </div>`;
+  } catch(e) { el.innerHTML='<div style="text-align:center;padding:16px;color:var(--pink)">Error loading.</div>'; }
+};
+
+window.uploadNewAvatar = async (input) => {
+  const file = input.files[0];
+  if (!file) return;
+  const id = "av_" + Date.now();
+  const url = await uploadFile(file, "avatars_"+id, (data) => {
+    set(ref(db,"uploads/avatars_"+id), {data, name:file.name, uploadedAt:Date.now()});
+    toast("New avatar added! Players can now pick it. 🎭");
+    loadCustomAvatars();
+  });
+  input.value = "";
+};
+
+window.uploadAvatarFile = async (avatarId, emoji, input) => {
+  const file = input.files[0];
+  if (!file) return;
+  await uploadFile(file, "avatars_"+avatarId, (data) => {
+    set(ref(db,"uploads/avatars_"+avatarId), {data, name:avatarId, emoji, uploadedAt:Date.now()});
+    const el = document.getElementById("av-display-"+avatarId);
+    if (el) el.innerHTML = `<img src="${data}" style="width:36px;height:36px;object-fit:contain;border-radius:7px">`;
+  });
+  input.value = "";
+};
+
+window.handleGeneralUpload = async (input) => {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  const results = document.getElementById("upload-results");
+  if (results) results.innerHTML = `<div style="font-size:11px;color:var(--blue);padding:8px;display:flex;align-items:center;gap:8px"><div class="spinner"></div>Uploading ${files.length} file(s)...</div>`;
+  const urls = [];
+  for (const file of files) {
+    const key = "general_" + Date.now() + "_" + file.name.replace(/[^a-z0-9]/gi,"_");
+    const url = await uploadFile(file, key, (data) => {
+      set(ref(db,"uploads/"+key.replace(/[\.\[\]#\$]/g,"_")), {data, name:file.name, size:file.size, uploadedAt:Date.now()});
+    });
+    if (url) urls.push({name:file.name, url});
+  }
+  if (results && urls.length) {
+    results.innerHTML = urls.map(u => `
+      <div style="display:flex;align-items:center;gap:10px;padding:9px;border-radius:8px;background:rgba(0,255,148,.06);border:1px solid rgba(0,255,148,.15);margin-bottom:6px">
+        <img src="${u.url}" style="width:32px;height:32px;border-radius:6px;object-fit:cover">
+        <div style="flex:1;font-size:11px;color:white;font-weight:600">${u.name}</div>
+        <span style="font-size:10px;color:var(--green)">✅ Saved</span>
+      </div>
+    `).join("");
+  }
+  input.value = "";
+};
+
+
+/* ══ LOAD ADMIN USERS WITH DELETE ══ */
+window.loadAdminUsers = async () => {
+  const el = document.getElementById("admin-users-list");
+  if (!el) return;
+  try {
+    const snap = await get(ref(db,"users"));
+    if (!snap.exists()) {
+      el.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted)">No players registered yet.</div>`;
+      return;
+    }
+    const users = [];
+    snap.forEach(c => users.push({id:c.key,...c.val()}));
+    users.sort((a,b) => (b.points||0) - (a.points||0));
+    // Update count badge
+    const cnt = document.getElementById("admin-user-count");
+    if (cnt) cnt.textContent = users.length;
+
+    el.innerHTML = users.map(u => `
+      <div class="table-row" style="grid-template-columns:2fr 1fr 1fr 1fr 100px" id="user-row-${u.id}">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,rgba(0,212,255,.25),rgba(168,85,247,.25));display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;border:2px solid rgba(0,212,255,.2)">${u.avatar||"🎮"}</div>
+          <div>
+            <div style="font-size:11.5px;font-weight:700;color:white">${u.username||"Unknown"}</div>
+            <div style="font-size:9.5px;color:var(--muted);margin-top:1px">${u.email||""} · ${u.city||"Uganda"}</div>
+          </div>
+        </div>
+        <div class="td">${u.favGame||"—"}</div>
+        <div style="font-size:11px;font-weight:700;color:var(--blue)">${u.rank||"Bronze"}</div>
+        <span class="tag" style="background:${u.banned?"rgba(255,45,120,.1)":"rgba(0,255,148,.08)"};border:1px solid ${u.banned?"rgba(255,45,120,.2)":"rgba(0,255,148,.2)"};color:${u.banned?"var(--pink)":"var(--green)"}">${u.banned?"Banned":"Active"}</span>
+        <div style="display:flex;gap:4px">
+          <button class="icon-btn" title="${u.banned?"Unban":"Ban"} user" onclick="toggleBanUser('${u.id}','${u.username||"user"}',${!!u.banned})" style="color:${u.banned?"var(--green)":"var(--gold)"}">
+            ${u.banned?"✅":"🚫"}
+          </button>
+          <button class="icon-btn" title="Delete user" onclick="confirmDeleteUser('${u.id}','${u.username||"user"}')" style="color:var(--pink)">🗑</button>
+        </div>
+      </div>
+    `).join("");
+  } catch(e) {
+    const el2 = document.getElementById("admin-users-list");
+    if (el2) el2.innerHTML = `<div style="padding:20px;text-align:center;color:var(--pink)">Error: ${e.message}</div>`;
+  }
+};
+
+window.filterUsers = (query) => {
+  const rows = document.querySelectorAll("#admin-users-list .table-row");
+  rows.forEach(row => {
+    const text = row.textContent.toLowerCase();
+    row.style.display = text.includes(query.toLowerCase()) ? "" : "none";
+  });
+};
+
+window.toggleBanUser = async (userId, username, currentlyBanned) => {
+  const action = currentlyBanned ? "unban" : "ban";
+  showConfirm(
+    `${currentlyBanned?"Unban":"Ban"} ${username}?`,
+    currentlyBanned ? "This player will be able to login again." : "This player will be blocked from logging in.",
+    currentlyBanned ? "Unban" : "Ban",
+    currentlyBanned ? "var(--green)" : "var(--gold)",
+    async () => {
+      try {
+        await update(ref(db,"users/"+userId), {banned: !currentlyBanned});
+        toast(`${username} ${currentlyBanned?"unbanned":"banned"} ✅`);
+        loadAdminUsers();
+      } catch(e) { toast("Error: " + e.message); }
+    }
+  );
+};
+
+window.confirmDeleteUser = (userId, username) => {
+  showConfirm(
+    `Delete ${username}?`,
+    "This will permanently delete their profile and all data. This cannot be undone.",
+    "Delete Forever",
+    "var(--pink)",
+    async () => {
+      try {
+        await remove(ref(db,"users/"+userId));
+        toast(`${username} deleted ✅`);
+        loadAdminUsers();
+      } catch(e) { toast("Error deleting user: " + e.message); }
+    }
+  );
+};
+
+/* ══ GAME LOGOS - LOAD, UPLOAD, DELETE ══ */
+window.loadGameLogos = async () => {
+  try {
+    const snap = await get(ref(db,"uploads"));
+    if (!snap.exists()) return;
+    // Load stored logos
+    DEFAULT_GAMES.forEach(g => {
+      const key = "media_games_" + g.id;
+      const logoData = snap.child(key).val();
+      if (logoData && logoData.data) {
+        const el = document.getElementById("media-game-" + g.id);
+        if (el) el.innerHTML = `<img src="${logoData.data}" alt="${g.name}" style="width:100%;height:100%;object-fit:contain;padding:6px">`;
+      }
+    });
+  } catch(e) {}
+};
+
+window.handleGameLogoUpload = async (gameId, gameName, input) => {
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById("logo-upload-status");
+  const msgEl = document.getElementById("logo-upload-msg");
+  if (statusEl) { statusEl.style.display = "flex"; }
+  if (msgEl) msgEl.textContent = `Uploading ${gameName} logo...`;
+  const url = await uploadFile(file, "media_games_" + gameId, (dataUrl) => {
+    const el = document.getElementById("media-game-" + gameId);
+    if (el) el.innerHTML = `<img src="${dataUrl}" alt="${gameName}" style="width:100%;height:100%;object-fit:contain;padding:6px">`;
+    // Also update the homepage game cards
+    const homeEl = document.getElementById("game-logo-" + gameId);
+    if (homeEl) homeEl.innerHTML = `<img src="${dataUrl}" alt="${gameName}" style="width:60px;height:60px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.5))">`;
+  });
+  if (statusEl) statusEl.style.display = "none";
+  input.value = "";
+  loadUploadedMedia();
+};
+
+window.deleteGameLogo = (gameId, gameName) => {
+  showConfirm(
+    `Remove ${gameName} logo?`,
+    "The logo will be removed and the default emoji will show instead.",
+    "Remove Logo",
+    "var(--pink)",
+    async () => {
+      try {
+        const key = ("media_games_" + gameId).replace(/[\.\[\]#\$]/g, "_");
+        await remove(ref(db,"uploads/"+key));
+        // Reset to emoji
+        const el = document.getElementById("media-game-" + gameId);
+        const game = DEFAULT_GAMES.find(g => g.id === gameId);
+        if (el && game) el.innerHTML = game.emoji;
+        toast(`${gameName} logo removed ✅`);
+        loadUploadedMedia();
+      } catch(e) { toast("Error: " + e.message); }
+    }
+  );
+};
+
+window.loadUploadedMedia = async () => {
+  const el = document.getElementById("uploaded-media-list");
+  if (!el) return;
+  try {
+    const snap = await get(ref(db,"uploads"));
+    if (!snap.exists()) {
+      el.innerHTML = `<div style="text-align:center;padding:20px;color:var(--muted)">No media uploaded yet.</div>`;
+      return;
+    }
+    const items = [];
+    snap.forEach(c => items.push({key:c.key,...c.val()}));
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px">
+        ${items.map(item => `
+          <div style="border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,.03);overflow:hidden;position:relative" onmouseover="this.querySelector('.del-overlay').style.opacity='1'" onmouseout="this.querySelector('.del-overlay').style.opacity='0'">
+            <div style="height:80px;display:flex;align-items:center;justify-content:center;overflow:hidden">
+              ${item.data ? `<img src="${item.data}" style="max-width:100%;max-height:100%;object-fit:contain;padding:4px">` : `<div style="font-size:1.5rem">📄</div>`}
+            </div>
+            <div style="padding:5px 7px;font-size:8.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${item.name||item.key}</div>
+            <div class="del-overlay" onclick="deleteUploadedFile('${item.key}')" style="position:absolute;inset:0;background:rgba(255,45,120,.85);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:white;cursor:pointer;opacity:0;transition:opacity .2s">🗑 Delete</div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  } catch(e) {
+    el.innerHTML = `<div style="text-align:center;padding:20px;color:var(--pink)">Error loading: ${e.message}</div>`;
+  }
+};
+
+window.deleteUploadedFile = (key) => {
+  showConfirm("Delete this file?", "This file will be permanently removed.", "Delete", "var(--pink)", async () => {
+    try {
+      await remove(ref(db,"uploads/"+key));
+      toast("File deleted ✅");
+      loadUploadedMedia();
+      loadGameLogos();
+    } catch(e) { toast("Error: " + e.message); }
+  });
+};
+
+/* ══ DANGER ZONE FUNCTIONS ══ */
+window.deleteAllPosts = () => {
+  showConfirm("Delete ALL Posts?", "This permanently removes every community post. Cannot be undone.", "Delete All Posts", "var(--pink)", async () => {
+    try {
+      await remove(ref(db,"posts"));
+      toast("All posts deleted ✅");
+    } catch(e) { toast("Error: " + e.message); }
+  });
+};
+
+window.clearAllMedia = () => {
+  showConfirm("Clear ALL Media?", "This removes all uploaded logos and media files from the database.", "Clear All Media", "var(--pink)", async () => {
+    try {
+      await remove(ref(db,"uploads"));
+      toast("All media cleared ✅");
+      loadUploadedMedia();
+    } catch(e) { toast("Error: " + e.message); }
+  });
+};
+
+window.clearAllTournaments = () => {
+  showConfirm("Reset ALL Tournaments?", "This removes all tournament records. The demo tournaments will still show on the homepage.", "Reset Tournaments", "var(--pink)", async () => {
+    try {
+      await remove(ref(db,"tournaments"));
+      toast("Tournaments reset ✅");
+    } catch(e) { toast("Error: " + e.message); }
+  });
+};
+
+/* ══ AVATAR DELETE/REPLACE ══ */
+window.deleteAdminAvatar = (avatarId, avatarName) => {
+  showConfirm(`Remove "${avatarName}" avatar?`, "Players who have this avatar will keep it but it won't be available for new selection.", "Remove Avatar", "var(--pink)", async () => {
+    try {
+      await remove(ref(db,"uploads/avatars_"+avatarId));
+      toast(`${avatarName} avatar removed ✅`);
+      adminSection("avatars", null);
+    } catch(e) { toast("Error: " + e.message); }
+  });
+};
+
+
 window.playerSection = (section, btnEl) => {
   // Update active nav
   document.querySelectorAll("#player-nav .db-link").forEach(b => b.classList.remove("active-blue"));
-  if (btnEl) btnEl.classList.add("active-blue");
-  else {
-    // Find and activate matching button
+  if (btnEl) {
+    btnEl.classList.add("active-blue");
+  } else {
+    // Find and activate matching button by searching onclick attr
     document.querySelectorAll("#player-nav .db-link").forEach(b => {
-      if (b.getAttribute("onclick")?.includes(`'${section}'`)) b.classList.add("active-blue");
+      const oc = b.getAttribute("onclick") || "";
+      if (oc.includes("'" + section + "'") || oc.includes('"' + section + '"')) {
+        b.classList.add("active-blue");
+      }
     });
   }
   const titles = {
@@ -1692,7 +2051,16 @@ window.changeAvatar = async (emoji, el) => {
 /* ══ ADMIN DASHBOARD ══ */
 window.adminSection = (section, btnEl) => {
   document.querySelectorAll("#admin-nav .db-link").forEach(b => b.classList.remove("active-purple"));
-  if (btnEl) btnEl.classList.add("active-purple");
+  if (btnEl) {
+    btnEl.classList.add("active-purple");
+  } else {
+    // Find button by section name
+    document.querySelectorAll("#admin-nav .db-link").forEach(b => {
+      if (b.getAttribute("onclick") && b.getAttribute("onclick").includes("'" + section + "'")) {
+        b.classList.add("active-purple");
+      }
+    });
+  }
   const titles = {
     overview:"Platform Overview",users:"User Management",tournaments:"Tournament Management",
     avatars:"Avatar Manager",media:"Media & Logos",revenue:"Revenue",
@@ -1787,38 +2155,16 @@ function renderAdminSection(section) {
         <div class="admin-table-head">
           <div class="admin-table-title">Players</div>
           <div style="display:flex;gap:8px;align-items:center">
-            <input class="small-input" placeholder="⌕ Search..." style="width:150px">
-            <button class="btn btn-purple" style="font-size:10.5px;padding:6px 13px">+ Add</button>
+            <input class="small-input" id="user-search" placeholder="⌕ Search..." style="width:150px" oninput="filterUsers(this.value)">
           </div>
         </div>
-        <div class="table-header" style="grid-template-columns:2fr 1fr 1fr 1fr 80px">
-          ${["Player","Game","Rank","Status",""].map(h=>`<div class="th">${h}</div>`).join("")}
+        <div class="table-header" style="grid-template-columns:2fr 1fr 1fr 1fr 100px">
+          ${["Player","Game","Rank","Status","Actions"].map(h=>`<div class="th">${h}</div>`).join("")}
         </div>
-        <div id="admin-users-list"><div style="padding:20px;text-align:center;color:var(--muted)">Loading players...</div></div>
+        <div id="admin-users-list"><div style="padding:20px;text-align:center;color:var(--muted)"><div class="spinner" style="margin:0 auto"></div></div></div>
       </div>
     `;
-    // Load real users from Firebase
-    get(ref(db,"users")).then(snap=>{
-      const el=document.getElementById("admin-users-list");
-      if(!el)return;
-      if(!snap.exists()){el.innerHTML=`<div style="padding:20px;text-align:center;color:var(--muted)">No players yet.</div>`;return;}
-      const users=[];
-      snap.forEach(c=>users.push({id:c.key,...c.val()}));
-      el.innerHTML=users.map(u=>`
-        <div class="table-row" style="grid-template-columns:2fr 1fr 1fr 1fr 80px">
-          <div style="display:flex;align-items:center;gap:8px">
-            <div style="width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,rgba(0,212,255,.25),rgba(168,85,247,.25));display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid rgba(0,212,255,.2)">${u.avatar||"🎮"}</div>
-            <div><div style="font-size:11.5px;font-weight:700;color:white">${u.username}</div><div style="font-size:9.5px;color:var(--muted);margin-top:1px">${u.email}</div></div>
-          </div>
-          <div class="td">${u.favGame||"—"}</div>
-          <div style="font-size:11px;font-weight:700;color:var(--blue)">${u.rank||"Bronze"}</div>
-          <span class="tag" style="background:rgba(0,255,148,.08);border:1px solid rgba(0,255,148,.2);color:var(--green)">Active</span>
-          <div style="display:flex;gap:4px"><div class="icon-btn">✏</div><div class="icon-btn" style="color:var(--pink)">🚫</div></div>
-        </div>
-      `).join("");
-      const cnt=document.getElementById("admin-user-count");
-      if(cnt)cnt.textContent=users.length.toString();
-    }).catch(e=>{const el=document.getElementById("admin-users-list");if(el)el.innerHTML=`<div style="padding:20px;text-align:center;color:var(--muted)">Error loading users.</div>`;});
+    loadAdminUsers();
   }
 
   else if (section === "tournaments") {
@@ -1858,30 +2204,33 @@ function renderAdminSection(section) {
         <div id="admin-t-list"><div style="padding:20px;text-align:center;color:var(--muted)">Loading...</div></div>
       </div>
     `;
-    loadAdminTournaments();
+    // Defer to ensure DOM is ready
+    setTimeout(() => loadAdminTournaments(), 50);
   }
 
   else if (section === "avatars") {
     c.innerHTML = `
-      <div class="db-welcome" style="margin-bottom:16px"><h1>🎭 <span>Avatar Manager</span></h1><p>Upload and manage player avatars</p></div>
-      <div class="db-grid-2">
+      <div class="db-welcome" style="margin-bottom:16px"><h1>🎭 <span>Avatar Manager</span></h1><p>Upload custom avatars · Players pick on registration</p></div>
+      <div class="db-grid-2" style="margin-bottom:14px">
         <div class="db-card">
-          <div class="db-card-title">✅ Free Avatars (All Players)</div>
+          <div class="db-card-title">✅ Free Avatars</div>
+          <div style="font-size:10.5px;color:var(--muted);margin-bottom:13px">These are always available to all players on registration.</div>
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px">
             ${FREE_AVATARS.map(a=>`
-              <div style="text-align:center;padding:12px 8px;border-radius:10px;background:rgba(255,255,255,.035);border:1px solid var(--border);position:relative">
-                <div style="font-size:26px;margin-bottom:5px">${a.e}</div>
+              <div style="text-align:center;padding:12px 8px;border-radius:10px;background:rgba(255,255,255,.035);border:1px solid var(--border);position:relative" onmouseover="this.querySelector('.av-del').style.opacity='1'" onmouseout="this.querySelector('.av-del').style.opacity='0'">
+                <div style="font-size:26px;margin-bottom:5px" id="av-display-${a.n.toLowerCase()}">${a.e}</div>
                 <div style="font-size:8.5px;color:var(--muted);font-weight:700;text-transform:uppercase;margin-bottom:7px">${a.n}</div>
                 <label style="display:block;cursor:pointer">
                   <input type="file" accept="image/*" style="display:none" onchange="uploadAvatarFile('${a.n.toLowerCase()}','${a.e}',this)">
-                  <span style="font-size:9px;padding:3px 8px;border-radius:5px;background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.2);color:var(--blue);font-weight:700">Replace</span>
+                  <span style="font-size:9px;padding:3px 8px;border-radius:5px;background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.2);color:var(--blue);font-weight:700;cursor:pointer">📤 Replace</span>
                 </label>
+                <button class="av-del" onclick="deleteAdminAvatar('${a.n.toLowerCase()}','${a.n}')" style="position:absolute;top:4px;right:4px;width:18px;height:18px;border-radius:4px;background:rgba(255,45,120,.8);border:none;color:white;font-size:10px;cursor:pointer;opacity:0;transition:opacity .2s;display:flex;align-items:center;justify-content:center">×</button>
               </div>
             `).join("")}
           </div>
         </div>
         <div class="db-card">
-          <div class="db-card-title">🔒 Locked Avatars (Earned by Winning)</div>
+          <div class="db-card-title">🔒 Locked Avatars (Earned)</div>
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:14px">
             ${LOCKED_AVATARS.map(a=>`
               <div style="text-align:center;padding:12px 8px;border-radius:10px;background:rgba(255,184,0,.05);border:1px solid rgba(255,184,0,.15)">
@@ -1891,63 +2240,60 @@ function renderAdminSection(section) {
               </div>
             `).join("")}
           </div>
+          <div style="font-size:10.5px;font-weight:700;color:white;margin-bottom:8px">Add New Special Avatar</div>
           <div class="upload-zone" style="position:relative">
-            <input type="file" accept="image/*" style="position:absolute;opacity:0;inset:0;cursor:pointer" onchange="uploadNewAvatar(this)">
-            <div style="font-size:1.8rem;margin-bottom:8px">📤</div>
-            <div style="font-size:12px;font-weight:700;color:white;margin-bottom:3px">Upload New Special Avatar</div>
-            <div style="font-size:10px;color:var(--muted)">PNG, SVG · Max 1MB · Square recommended</div>
+            <input type="file" accept="image/*" style="position:absolute;opacity:0;inset:0;cursor:pointer;z-index:2" onchange="uploadNewAvatar(this)">
+            <div style="font-size:1.8rem;margin-bottom:7px">📤</div>
+            <div style="font-size:12px;font-weight:700;color:white;margin-bottom:2px">Upload Special Avatar</div>
+            <div style="font-size:10px;color:var(--muted)">PNG, SVG · Max 1MB · Square image</div>
           </div>
         </div>
       </div>
+      <div class="db-card">
+        <div class="db-card-title">📁 Custom Uploaded Avatars</div>
+        <div id="custom-avatars-list"><div style="text-align:center;padding:16px;color:var(--muted)">Loading...</div></div>
+      </div>
     `;
+    loadCustomAvatars();
   }
 
   else if (section === "media") {
     c.innerHTML = `
-      <div class="db-welcome" style="margin-bottom:16px"><h1>🖼 <span>Media & Game Logos</span></h1><p>Upload logos and tournament banners</p></div>
+      <div class="db-welcome" style="margin-bottom:16px"><h1>🖼 <span>Media & Game Logos</span></h1><p>Upload logos · Click to replace · Hover to delete</p></div>
       <div class="db-card" style="margin-bottom:14px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <div class="db-card-title" style="margin:0">Game Logos</div>
-          <div style="font-size:10.5px;color:var(--muted)">Click any game to upload its logo</div>
+          <div style="font-size:10px;color:var(--muted)">Click a game card to upload its logo · Max 2MB</div>
         </div>
-        <div class="media-grid">
+        <div style="font-size:10.5px;color:var(--blue);margin-bottom:14px;padding:8px 12px;border-radius:8px;background:rgba(0,212,255,.06);border:1px solid rgba(0,212,255,.15)">
+          ℹ️ Logos are stored in Firebase Database as base64. They appear instantly on the homepage after upload.
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px" id="game-logos-grid">
           ${DEFAULT_GAMES.map(g=>`
-            <div class="media-item">
-              <label style="cursor:pointer;display:block">
-                <input type="file" accept="image/*" style="display:none" onchange="handleGameLogoUpload('${g.id}',this)">
-                <div class="media-thumb" id="media-game-${g.id}" style="font-size:2rem">${g.emoji}</div>
-                <div class="media-label">${g.name}</div>
+            <div style="border-radius:13px;border:1px solid var(--border);background:rgba(255,255,255,.03);overflow:hidden;transition:border-color .2s" onmouseover="this.querySelector('.del-btn').style.opacity='1'" onmouseout="this.querySelector('.del-btn').style.opacity='0'">
+              <label style="cursor:pointer;display:block;position:relative">
+                <input type="file" accept="image/*" style="display:none" onchange="handleGameLogoUpload('${g.id}','${g.name}',this)">
+                <div id="media-game-${g.id}" style="height:80px;display:flex;align-items:center;justify-content:center;font-size:2.4rem;background:${g.bg}">${g.emoji}</div>
+                <div style="padding:6px 8px 4px;font-size:9.5px;color:var(--muted);text-align:center;font-weight:600">${g.name}</div>
+                <div style="padding:0 8px 8px;display:flex;gap:5px">
+                  <div style="flex:1;padding:5px;border-radius:6px;background:rgba(0,212,255,.12);border:1px solid rgba(0,212,255,.22);font-size:9.5px;color:var(--blue);text-align:center;font-weight:700">📤 Upload</div>
+                </div>
               </label>
-              <div class="media-actions">
-                <button class="media-action-btn" style="background:rgba(0,212,255,.2);color:var(--blue)" title="Upload">📤</button>
-              </div>
+              <button class="del-btn" onclick="deleteGameLogo('${g.id}','${g.name}')" style="width:100%;padding:5px 0;background:rgba(255,45,120,.1);border:none;border-top:1px solid rgba(255,45,120,.2);font-size:9.5px;color:var(--pink);cursor:pointer;font-weight:700;opacity:0;transition:opacity .2s">🗑 Remove Logo</button>
             </div>
           `).join("")}
         </div>
-        <div id="upload-progress" style="display:none;margin-top:12px;padding:10px;border-radius:9px;background:rgba(0,212,255,.06);border:1px solid rgba(0,212,255,.15);font-size:11px;color:var(--blue);text-align:center">Uploading...</div>
+        <div id="logo-upload-status" style="display:none;margin-top:12px;padding:10px 14px;border-radius:9px;background:rgba(0,212,255,.06);border:1px solid rgba(0,212,255,.15);font-size:11.5px;color:var(--blue);display:none;align-items:center;gap:8px">
+          <div class="spinner"></div><span id="logo-upload-msg">Uploading...</span>
+        </div>
       </div>
       <div class="db-card">
-        <div class="db-card-title">📤 General Upload</div>
-        <div class="upload-zone" style="position:relative">
-          <input type="file" accept="image/*,video/*" multiple style="position:absolute;opacity:0;inset:0;cursor:pointer;z-index:2" onchange="handleGeneralUpload(this)">
-          <div style="font-size:2rem;margin-bottom:10px">☁️</div>
-          <div style="font-size:13px;font-weight:700;color:white;margin-bottom:4px">Drop files here or click to browse</div>
-          <div style="font-size:10.5px;color:var(--muted);margin-bottom:12px">Game logos, tournament banners, sponsor images, avatars</div>
-          <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">
-            ${["PNG","SVG","JPG","WEBP","Max 5MB"].map(f=>`<span style="padding:3px 8px;border-radius:4px;background:rgba(255,255,255,.06);border:1px solid var(--border);font-size:9px;color:var(--muted)">${f}</span>`).join("")}
-          </div>
-        </div>
-        <div id="upload-results" style="margin-top:12px"></div>
+        <div class="db-card-title">📁 All Uploaded Media</div>
+        <div id="uploaded-media-list"><div style="text-align:center;padding:20px;color:var(--muted)">Loading...</div></div>
       </div>
     `;
-    // Load existing game logos from Firebase
-    get(ref(db,"media/games")).then(snap=>{
-      if(!snap.exists())return;
-      snap.forEach(child=>{
-        const el=document.getElementById("media-game-"+child.key);
-        if(el&&child.val().url) el.innerHTML=`<img src="${child.val().url}" alt="${child.key}" style="width:100%;height:100%;object-fit:contain;padding:4px">`;
-      });
-    }).catch(()=>{});
+    loadGameLogos();
+    loadUploadedMedia();
   }
 
   else if (section === "revenue") {
@@ -1995,16 +2341,49 @@ function renderAdminSection(section) {
 
   else if (section === "security") {
     c.innerHTML = `
-      <div class="db-welcome" style="margin-bottom:16px"><h1>🔒 <span>Security</span></h1><p>Platform security alerts</p></div>
-      <div class="db-card">
-        <div class="db-card-title">⚠️ Active Alerts (3)</div>
-        ${[{ic:"🚫",tx:"BadBoy_KLA attempted login 15 times — account banned.",t:"2 hours ago",c:"#ff2d78"},{ic:"⚠️",tx:"Unusual login from new device detected for UgandaSniper.",t:"Yesterday",c:"#ffb800"},{ic:"🔒",tx:"Failed payment verification for tournament entry.",t:"2 days ago",c:"#f97316"}].map(a=>`
-          <div style="display:flex;gap:10px;padding:12px;border-radius:10px;background:${a.c}08;border:1px solid ${a.c}20;margin-bottom:8px">
-            <div style="width:30px;height:30px;border-radius:8px;background:${a.c}14;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">${a.ic}</div>
-            <div style="flex:1"><div style="font-size:11.5px;color:white;line-height:1.5">${a.tx}</div><div style="font-size:9.5px;color:var(--muted);margin-top:2px">${a.t}</div></div>
-            <button class="btn btn-ghost" style="font-size:9.5px;padding:4px 10px;flex-shrink:0" onclick="toast('Alert resolved ✅')">Resolve</button>
+      <div class="db-welcome" style="margin-bottom:16px"><h1>🔒 <span>Security</span></h1><p>Platform security & admin controls</p></div>
+      <div class="db-grid-2" style="margin-bottom:14px">
+        <div class="db-card">
+          <div class="db-card-title">⚠️ Security Alerts</div>
+          ${[{ic:"🚫",tx:"BadBoy_KLA attempted login 15 times — account banned.",t:"2 hours ago",c:"#ff2d78"},{ic:"⚠️",tx:"Unusual login from new device for UgandaSniper.",t:"Yesterday",c:"#ffb800"},{ic:"🔒",tx:"Failed payment verification for tournament entry.",t:"2 days ago",c:"#f97316"}].map(a=>`
+            <div style="display:flex;gap:9px;padding:11px;border-radius:9px;background:${a.c}08;border:1px solid ${a.c}20;margin-bottom:7px">
+              <div style="width:28px;height:28px;border-radius:7px;background:${a.c}14;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0">${a.ic}</div>
+              <div style="flex:1"><div style="font-size:11px;color:white;line-height:1.5">${a.tx}</div><div style="font-size:9px;color:var(--muted);margin-top:2px">${a.t}</div></div>
+              <button class="btn btn-ghost" style="font-size:9.5px;padding:4px 9px;flex-shrink:0" onclick="toast('Alert resolved ✅')">Resolve</button>
+            </div>
+          `).join("")}
+        </div>
+        <div class="db-card">
+          <div class="db-card-title">🗑 Danger Zone</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="padding:14px;border-radius:11px;background:rgba(255,45,120,.06);border:1px solid rgba(255,45,120,.2)">
+              <div style="font-size:12px;font-weight:700;color:white;margin-bottom:4px">Delete All Community Posts</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Permanently removes all posts from the community feed.</div>
+              <button class="btn" style="background:var(--pink);color:white;font-size:11px;padding:7px 14px" onclick="deleteAllPosts()">🗑 Delete All Posts</button>
+            </div>
+            <div style="padding:14px;border-radius:11px;background:rgba(255,45,120,.06);border:1px solid rgba(255,45,120,.2)">
+              <div style="font-size:12px;font-weight:700;color:white;margin-bottom:4px">Clear All Uploaded Media</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Removes all uploaded game logos and media from the database.</div>
+              <button class="btn" style="background:var(--pink);color:white;font-size:11px;padding:7px 14px" onclick="clearAllMedia()">🗑 Clear All Media</button>
+            </div>
+            <div style="padding:14px;border-radius:11px;background:rgba(255,45,120,.06);border:1px solid rgba(255,45,120,.2)">
+              <div style="font-size:12px;font-weight:700;color:white;margin-bottom:4px">Reset All Tournament Data</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Removes all tournament records from the database.</div>
+              <button class="btn" style="background:var(--pink);color:white;font-size:11px;padding:7px 14px" onclick="clearAllTournaments()">🗑 Reset Tournaments</button>
+            </div>
           </div>
-        `).join("")}
+        </div>
+      </div>
+      <div class="db-card">
+        <div class="db-card-title">📋 Admin Info</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${[{l:"Admin Email",v:"Kazibwekenneth57@gmail.com",c:"#a855f7"},{l:"Platform",v:"GAMEON UG",c:"#00d4ff"},{l:"Database",v:"Firebase Realtime DB",c:"#00ff94"},{l:"Hosting",v:"GitHub Pages",c:"#ffb800"},{l:"Auth",v:"Firebase Auth",c:"#00d4ff"},{l:"Version",v:"v2.0 — June 2026",c:"#a855f7"}].map(s=>`
+            <div style="padding:11px;border-radius:9px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.06)">
+              <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${s.l}</div>
+              <div style="font-size:11.5px;font-weight:700;color:${s.c}">${s.v}</div>
+            </div>
+          `).join("")}
+        </div>
       </div>
     `;
   }
@@ -2104,50 +2483,149 @@ window.deleteTournament = async (id) => {
 window.handleGameLogoUpload = async (gameId, input) => {
   const file = input.files[0];
   if (!file) return;
-  const prog = document.getElementById("upload-progress");
-  if (prog) prog.style.display = "block";
+  // Show uploading state on the item
+  const thumbEl = document.getElementById("media-game-"+gameId);
+  if (thumbEl) thumbEl.style.opacity = "0.5";
   const url = await uploadGameLogo(gameId, file);
+  if (thumbEl) thumbEl.style.opacity = "1";
   if (url) {
-    const el = document.getElementById("media-game-"+gameId);
-    if (el) el.innerHTML = `<img src="${url}" style="width:100%;height:100%;object-fit:contain;padding:4px">`;
+    // Update media grid
+    if (thumbEl) thumbEl.innerHTML = '<img src="'+url+'" style="width:100%;height:100%;object-fit:contain;padding:4px"><div style="position:absolute;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .2s;border-radius:6px 6px 0 0" class="upload-hover"><span style="font-size:1.2rem">📤</span></div>';
+    // Update on homepage too
+    const homeEl = document.getElementById("game-logo-"+gameId);
+    if (homeEl) homeEl.innerHTML = '<img src="'+url+'" style="width:60px;height:60px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.5))">';
   }
-  if (prog) prog.style.display = "none";
+  // Reset input
+  input.value = "";
+};
+
+window.deleteGameLogo = async (gameId, defaultEmoji) => {
+  if (!confirm("Delete the logo for " + gameId + "? It will revert to the default icon.")) return;
+  try {
+    await remove(ref(db, "media/games/" + gameId));
+    // Revert to emoji in media grid
+    const thumbEl = document.getElementById("media-game-"+gameId);
+    if (thumbEl) thumbEl.innerHTML = '<span id="media-emoji-'+gameId+'" style="font-size:2rem">'+defaultEmoji+'</span>';
+    // Revert on homepage
+    const homeEl = document.getElementById("game-logo-"+gameId);
+    if (homeEl) homeEl.innerHTML = defaultEmoji;
+    toast("Logo deleted — reverted to default icon 🗑");
+  } catch(e) {
+    toast("Error deleting logo. Check Firebase rules.");
+  }
 };
 
 window.handleGeneralUpload = async (input) => {
-  const files = input.files;
+  const files = Array.from(input.files);
   if (!files.length) return;
   const results = document.getElementById("upload-results");
-  if (results) results.innerHTML = `<div style="font-size:11px;color:var(--blue);padding:8px">Uploading ${files.length} file(s)...</div>`;
-  const urls = [];
+  if (results) results.innerHTML = '<div style="font-size:11px;color:var(--blue);padding:10px;text-align:center"><div class="spinner" style="margin:0 auto 8px"></div>Uploading '+files.length+' file(s)...</div>';
+  const uploaded = [];
   for (const file of files) {
-    const url = await uploadFile(file, `media/general/${Date.now()}_${file.name}`, url => {
-      set(ref(db,`media/general/${Date.now()}`), {url, name: file.name, size: file.size, uploadedAt: Date.now()});
+    const uid = "general_" + Date.now() + "_" + file.name.replace(/[^a-z0-9]/gi,"_");
+    const url = await uploadFile(file, "media/general/" + uid, (url) => {
+      // saved to DB inside uploadFile
     });
-    if (url) urls.push({name: file.name, url});
+    if (url) uploaded.push({name: file.name, url});
   }
-  if (results && urls.length) {
-    results.innerHTML = urls.map(u => `
-      <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:8px;background:rgba(0,255,148,.06);border:1px solid rgba(0,255,148,.15);margin-bottom:6px">
-        <img src="${u.url}" style="width:32px;height:32px;border-radius:6px;object-fit:cover">
-        <div style="flex:1;font-size:11px;color:white">${u.name}</div>
-        <a href="${u.url}" target="_blank" style="font-size:10px;color:var(--blue)">View</a>
-      </div>
-    `).join("");
+  if (!results) return;
+  if (!uploaded.length) {
+    results.innerHTML = '<div style="font-size:11px;color:var(--pink);padding:10px">Upload failed. Check file size and Firebase rules.</div>';
+    return;
   }
+  results.innerHTML = '<div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:10px">✅ '+uploaded.length+' file(s) uploaded!</div>' +
+    uploaded.map(u => '<div style="display:flex;align-items:center;gap:10px;padding:9px;border-radius:9px;background:rgba(0,255,148,.06);border:1px solid rgba(0,255,148,.15);margin-bottom:6px"><img src="'+u.url+'" style="width:36px;height:36px;border-radius:7px;object-fit:cover;flex-shrink:0"><div style="flex:1;min-width:0"><div style="font-size:11.5px;color:white;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+u.name+'</div><div style="font-size:9.5px;color:var(--muted);margin-top:2px">Saved to Firebase</div></div><button onclick="copyUrl(\''+u.url+'\');" style="font-size:9.5px;padding:4px 9px;border-radius:6px;background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.2);color:var(--blue);cursor:pointer">Copy URL</button></div>').join("");
+  input.value = "";
 };
 
-window.uploadAvatarFile = async (avatarId, emoji, input) => {
-  const file = input.files[0];
-  if (!file) return;
-  await uploadAvatar(avatarId, file, {emoji, name: avatarId});
+window.copyUrl = (url) => {
+  navigator.clipboard.writeText(url).then(()=>toast("URL copied! 📋")).catch(()=>toast("Copy failed."));
 };
 
-window.uploadNewAvatar = async (input) => {
+/* ══ NOTIFICATION PANEL ══ */
+window.openNotifPanel = () => {
+  // Remove existing panel
+  const existing = document.getElementById("notif-panel");
+  if (existing) { existing.remove(); return; }
+
+  const panel = document.createElement("div");
+  panel.id = "notif-panel";
+  panel.style.cssText = "position:fixed;top:52px;right:16px;width:320px;background:rgba(8,10,20,.98);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.1);border-radius:16px;z-index:999;box-shadow:0 20px 60px rgba(0,0,0,.6);overflow:hidden";
+  panel.innerHTML = `
+    <div style="padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:13px;font-weight:800;color:white">🔔 Notifications</div>
+      <button onclick="document.getElementById('notif-panel').remove()" style="background:none;border:none;color:rgba(255,255,255,.4);font-size:16px;cursor:pointer">✕</button>
+    </div>
+    <div style="max-height:380px;overflow-y:auto;padding:10px">
+      ${[
+        {ic:"⚔",tx:"FC 26 Uganda Cup starts in 30 minutes!",t:"Just now",c:"#ff2d78",u:true},
+        {ic:"🏆",tx:"Achievement unlocked: On Fire! 5 wins in a row!",t:"2 hours ago",c:"#ffb800",u:true},
+        {ic:"👥",tx:"KingSlayer256 invited you to Elite Squad",t:"Yesterday",c:"#00d4ff",u:false},
+        {ic:"💎",tx:"260 points away from Diamond rank!",t:"2 days ago",c:"#a855f7",u:false},
+        {ic:"🎮",tx:"New tournament: Free Fire Grand Prix — 100K UGX",t:"3 days ago",c:"#00ff94",u:false},
+      ].map(n=>`
+        <div style="display:flex;gap:9px;padding:10px;border-radius:9px;background:${n.u?n.c+"0a":"rgba(255,255,255,.02)"};border:1px solid ${n.u?n.c+"1a":"rgba(255,255,255,.04)"};border-left:2px solid ${n.u?n.c:"transparent"};margin-bottom:6px">
+          <div style="width:28px;height:28px;border-radius:8px;background:${n.c}14;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0">${n.ic}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11.5px;color:white;font-weight:${n.u?600:400};line-height:1.4">${n.tx}</div>
+            <div style="font-size:9.5px;color:rgba(255,255,255,.35);margin-top:2px">${n.t}</div>
+          </div>
+          ${n.u?`<div style="width:7px;height:7px;border-radius:50%;background:${n.c};flex-shrink:0;margin-top:4px;box-shadow:0 0 5px ${n.c}"></div>`:""}
+        </div>
+      `).join("")}
+    </div>
+    <div style="padding:10px 16px;border-top:1px solid rgba(255,255,255,.06);text-align:center">
+      <button onclick="playerSection('notifications',null);document.getElementById('notif-panel').remove();" style="font-size:11px;color:var(--blue);background:none;border:none;cursor:pointer;font-weight:600">View All Notifications →</button>
+    </div>
+  `;
+  document.body.appendChild(panel);
+
+  // Close on outside click
+  setTimeout(()=>{
+    document.addEventListener("click", function closePanel(e) {
+      if (!panel.contains(e.target) && e.target.id !== "bell-btn") {
+        panel.remove();
+        document.removeEventListener("click", closePanel);
+      }
+    });
+  }, 100);
+};
+
+window.uploadAvatarFile = async (avatarId, defaultEmoji, input) => {
   const file = input.files[0];
   if (!file) return;
-  const id = "custom_" + Date.now();
-  await uploadAvatar(id, file, {emoji: "⭐", name: "Custom Avatar", custom: true});
+  toast("Uploading avatar image...");
+  const url = await uploadFile(file, "avatars/" + avatarId, (url) => {
+    // Save to avatars DB path
+    set(ref(db, "avatars/" + avatarId), {url, emoji: defaultEmoji, name: avatarId, updatedAt: Date.now()});
+    // Update display in avatar manager
+    const displayEl = document.getElementById("av-display-" + avatarId) || document.getElementById("av-display-locked-" + avatarId);
+    if (displayEl) displayEl.innerHTML = '<img src="'+url+'" style="width:36px;height:36px;border-radius:8px;object-fit:cover">';
+    toast("✅ Avatar image uploaded!");
+  });
+  input.value = "";
+};
+
+window.deleteAvatarCustom = async (avatarId, defaultEmoji) => {
+  if (!confirm("Remove custom image for this avatar? It will revert to the default emoji.")) return;
+  try {
+    await remove(ref(db, "avatars/" + avatarId));
+    const displayEl = document.getElementById("av-display-" + avatarId);
+    if (displayEl) displayEl.innerHTML = defaultEmoji;
+    toast("Avatar reverted to default 🗑");
+  } catch(e) { toast("Error: " + e.message); }
+};
+
+window.uploadNewSpecialAvatar = async (input) => {
+  const file = input.files[0];
+  if (!file) return;
+  const id = "special_" + Date.now();
+  toast("Uploading special avatar...");
+  await uploadFile(file, "avatars/" + id, (url) => {
+    set(ref(db, "avatars/" + id), {url, emoji: "⭐", name: "Special " + new Date().toLocaleDateString(), custom: true, createdAt: Date.now()});
+    toast("✅ Special avatar uploaded! Players can now earn it.");
+  });
+  input.value = "";
 };
 
 async function loadAdminPosts() {
@@ -2179,7 +2657,121 @@ window.deletePost = async (id) => {
   catch(e) { toast("Error."); }
 };
 
+/* ══ ADMIN USERS ══ */
+let allAdminUsers = [];
+window.loadAdminUsers = async () => {
+  const el = document.getElementById("admin-users-list");
+  if (!el) return;
+  try {
+    const snap = await get(ref(db,"users"));
+    if (!snap.exists()) {
+      el.innerHTML = `<div style="padding:30px;text-align:center;color:var(--muted)">No players registered yet.</div>`;
+      return;
+    }
+    allAdminUsers = [];
+    snap.forEach(c => allAdminUsers.push({id:c.key, ...c.val()}));
+    renderAdminUsers(allAdminUsers);
+    const cnt = document.getElementById("admin-user-count");
+    if (cnt) cnt.textContent = allAdminUsers.length.toString();
+  } catch(e) {
+    el.innerHTML = `<div style="padding:30px;text-align:center;color:var(--pink)">Error loading users. Check Firebase rules.</div>`;
+  }
+};
+
+function renderAdminUsers(users) {
+  const el = document.getElementById("admin-users-list");
+  if (!el) return;
+  if (!users.length) {
+    el.innerHTML = `<div style="padding:30px;text-align:center;color:var(--muted)">No players found.</div>`;
+    return;
+  }
+  el.innerHTML = users.map(u => `
+    <div class="table-row" style="grid-template-columns:2fr 1fr 1fr 1fr 100px" id="user-row-${u.id}">
+      <div style="display:flex;align-items:center;gap:9px">
+        <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,rgba(0,212,255,.25),rgba(168,85,247,.25));display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;border:1px solid rgba(0,212,255,.2)">${u.avatar||"🎮"}</div>
+        <div style="min-width:0">
+          <div style="font-size:11.5px;font-weight:700;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u.username||"Unknown"}</div>
+          <div style="font-size:9.5px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u.email||""}</div>
+        </div>
+      </div>
+      <div class="td" style="font-size:10.5px">${u.favGame||"—"}</div>
+      <div style="font-size:11px;font-weight:700;color:var(--blue)">${u.rank||"Bronze"}</div>
+      <div style="font-size:10px;color:var(--muted)">${u.joinedAt ? new Date(u.joinedAt).toLocaleDateString() : "—"}</div>
+      <div style="display:flex;gap:4px;align-items:center">
+        <button class="icon-btn" title="Edit user" onclick="toast('Edit coming soon')">✏</button>
+        <button class="icon-btn" title="Ban user" style="color:var(--gold)" onclick="banUser('${u.id}','${u.username||""}')">🚫</button>
+        <button class="icon-btn" title="Delete permanently" style="color:var(--pink);background:rgba(255,45,120,.08);border-color:rgba(255,45,120,.2)" onclick="confirmDeleteUser('${u.id}','${u.username||"Unknown"}')">🗑</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+window.filterUsers = (q) => {
+  const filtered = q ? allAdminUsers.filter(u =>
+    (u.username||"").toLowerCase().includes(q.toLowerCase()) ||
+    (u.email||"").toLowerCase().includes(q.toLowerCase()) ||
+    (u.favGame||"").toLowerCase().includes(q.toLowerCase())
+  ) : allAdminUsers;
+  renderAdminUsers(filtered);
+};
+
+window.confirmDeleteUser = (uid, name) => {
+  if (confirm(`⚠️ Delete player "${name}" permanently?\n\nThis CANNOT be undone. All their data will be removed.`)) {
+    deleteUser(uid, name);
+  }
+};
+
+window.deleteUser = async (uid, name) => {
+  try {
+    // Remove from database
+    await remove(ref(db, "users/" + uid));
+    // Also remove their posts
+    const postsSnap = await get(ref(db, "posts"));
+    if (postsSnap.exists()) {
+      const toDelete = [];
+      postsSnap.forEach(c => { if (c.val().uid === uid) toDelete.push(c.key); });
+      for (const pid of toDelete) await remove(ref(db, "posts/" + pid));
+    }
+    // Remove the row from UI
+    const row = document.getElementById("user-row-" + uid);
+    if (row) row.remove();
+    allAdminUsers = allAdminUsers.filter(u => u.id !== uid);
+    const cnt = document.getElementById("admin-user-count");
+    if (cnt) cnt.textContent = allAdminUsers.length.toString();
+    toast(`Player "${name}" deleted permanently 🗑`);
+  } catch(e) {
+    toast("Error deleting user. Check Firebase rules.");
+    console.error(e);
+  }
+};
+
+window.banUser = async (uid, name) => {
+  try {
+    await update(ref(db, "users/" + uid), {banned: true, bannedAt: Date.now()});
+    toast(`Player "${name}" banned 🚫`);
+    loadAdminUsers();
+  } catch(e) { toast("Error banning user."); }
+};
+
 /* ══ HELPERS ══ */
+window.deleteAllPosts = async () => {
+  if (!confirm("⚠️ Delete ALL community posts permanently?\n\nThis CANNOT be undone!")) return;
+  try {
+    await remove(ref(db,"posts"));
+    toast("All posts deleted 🗑");
+  } catch(e) { toast("Error: " + e.message); }
+};
+
+window.resetAllLogos = async () => {
+  if (!confirm("⚠️ Reset ALL game logos to defaults?\n\nThis will delete all uploaded logos.")) return;
+  try {
+    await remove(ref(db,"media/games"));
+    toast("All logos reset to defaults ✅");
+    // Refresh games display
+    renderPublicGames();
+  } catch(e) { toast("Error: " + e.message); }
+};
+
 function timeAgo(ts) {
   const d = Date.now() - ts;
   if (d < 60000) return "Just now";
@@ -2249,6 +2841,64 @@ window.selectGame = (el) => {
 window.addEventListener("DOMContentLoaded", () => {
   if (window.renderPublicGames) window.renderPublicGames();
 });
+
+/* ══ CONFIRM MODAL ══ */
+let _confirmCallback = null;
+window.showConfirm = (title, msg, okLabel, okColor, cb) => {
+  document.getElementById("confirm-title").textContent = title;
+  document.getElementById("confirm-msg").textContent = msg;
+  const btn = document.getElementById("confirm-ok-btn");
+  btn.textContent = okLabel || "Delete";
+  btn.style.background = okColor || "var(--pink)";
+  _confirmCallback = cb;
+  document.getElementById("confirm-modal").classList.add("open");
+};
+window.closeConfirm = () => {
+  document.getElementById("confirm-modal").classList.remove("open");
+  _confirmCallback = null;
+};
+document.getElementById("confirm-modal").addEventListener("click", function(e){ if(e.target===this) closeConfirm(); });
+document.getElementById("confirm-ok-btn").addEventListener("click", () => {
+  if (_confirmCallback) _confirmCallback();
+  closeConfirm();
+});
+
+/* ══ NOTIFICATION PANEL ══ */
+window.toggleNotifPanel = () => {
+  const p = document.getElementById("notif-panel");
+  p.classList.toggle("open");
+  if (p.classList.contains("open")) loadNotifPanel();
+};
+window.closeNotifPanel = () => document.getElementById("notif-panel").classList.remove("open");
+
+window.loadNotifPanel = () => {
+  const list = document.getElementById("notif-panel-list");
+  if (!list) return;
+  const notifs = [
+    {ic:"⚔",tx:"FC 26 Uganda Cup starts in 30 minutes!",t:"Just now",c:"#ff2d78",u:true},
+    {ic:"🏆",tx:"Achievement unlocked: On Fire! 5 wins in a row!",t:"2 hours ago",c:"#ffb800",u:true},
+    {ic:"👥",tx:"KingSlayer256 invited you to join Elite Squad.",t:"Yesterday",c:"#00d4ff",u:true},
+    {ic:"💎",tx:"You are 260 points away from Diamond rank!",t:"2 days ago",c:"#a855f7",u:false},
+    {ic:"🎮",tx:"New tournament: Free Fire Grand Prix - 100K UGX!",t:"3 days ago",c:"#00ff94",u:false},
+  ];
+  list.innerHTML = notifs.map(n => `
+    <div style="display:flex;gap:9px;padding:10px;border-radius:9px;background:${n.u?n.c+"0a":"rgba(255,255,255,.02)"};border:1px solid ${n.u?n.c+"1a":"rgba(255,255,255,.05)"};border-left:2px solid ${n.u?n.c:"transparent"};margin-bottom:6px">
+      <div style="width:28px;height:28px;border-radius:8px;background:${n.c}14;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0">${n.ic}</div>
+      <div style="flex:1"><div style="font-size:11.5px;color:white;font-weight:${n.u?600:400};line-height:1.5">${n.tx}</div><div style="font-size:9px;color:var(--dim);margin-top:2px">${n.t}</div></div>
+      ${n.u?`<div style="width:6px;height:6px;border-radius:50%;background:${n.c};flex-shrink:0;margin-top:4px"></div>`:""}
+    </div>
+  `).join("");
+};
+
+// Close notification panel when clicking outside
+document.addEventListener("click", (e) => {
+  const panel = document.getElementById("notif-panel");
+  const bellBtn = e.target.closest(".db-icon-btn");
+  if (panel && panel.classList.contains("open") && !panel.contains(e.target) && !bellBtn) {
+    panel.classList.remove("open");
+  }
+});
+
 </script>
 </body>
 </html>
